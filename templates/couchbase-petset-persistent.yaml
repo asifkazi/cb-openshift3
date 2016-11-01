@@ -116,13 +116,14 @@ objects:
       volumeClaimTemplates:
       - metadata:
           name: data
-          annotations:
-            volume.alpha.kubernetes.io/storage-class: '${STORAGE_CLASS_DATA}'
         spec:
           accessModes: [ "ReadWriteOnce" ]
           resources:
             requests:
               storage: '${VOLUME_CAPACITY_DATA}'
+            selector:
+              matchLabels:
+                name: couchbase-data
   - kind: Service
     apiVersion: v1
     metadata:
@@ -207,13 +208,14 @@ objects:
       volumeClaimTemplates:
       - metadata:
           name: data
-          annotations:
-            volume.alpha.kubernetes.io/storage-class: '${STORAGE_CLASS_INDEX}'
         spec:
           accessModes: [ "ReadWriteOnce" ]
           resources:
             requests:
               storage: '${VOLUME_CAPACITY_INDEX}'
+            selector:
+              matchLabels:
+                name: couchbase-index
   - apiVersion: v1
     kind: DeploymentConfig
     metadata:
@@ -369,4 +371,3 @@ parameters:
     required: true
 labels:
   template: couchbase-petset-persistent-template
-

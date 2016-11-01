@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: couchbase-data-0
+  labels:
+    name: couchbase-data
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Recycle
+  hostPath:
+    path: /tmp/data
+    server: ose3-node-0.ste-dev.acs.eu-muc-1.msp.amadeus.net
