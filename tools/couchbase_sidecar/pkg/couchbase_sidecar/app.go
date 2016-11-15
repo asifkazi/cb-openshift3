@@ -2,6 +2,7 @@ package couchbase_sidecar
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -59,21 +60,29 @@ type CouchbaseSidecar struct {
 	// stop channel for shutting down
 	stopCh chan struct{}
 
-	// wait group
-	waitGroup sync.WaitGroup
+	// wait groups
+	waitGroupWorkers sync.WaitGroup
+
+	// graceful stop
+	waitGroupStopHookReceived sync.WaitGroup
+	waitGroupStopHookFinished sync.WaitGroup
+	waitGroupStopHookOnce     sync.Once
 }
 
 func New() *CouchbaseSidecar {
 	cs := &CouchbaseSidecar{
-		resyncPeriod: 5 * time.Minute,
-		stopCh:       make(chan struct{}),
-		waitGroup:    sync.WaitGroup{},
+		resyncPeriod:              5 * time.Minute,
+		stopCh:                    make(chan struct{}),
+		waitGroupWorkers:          sync.WaitGroup{},
+		waitGroupStopHookReceived: sync.WaitGroup{},
+		waitGroupStopHookFinished: sync.WaitGroup{},
 		couchbaseConfig: CouchbaseConfig{
 			URL:      "http://127.0.0.1:8091",
 			Username: "admin",
 			Password: "jetstack",
 		},
 	}
+	cs.waitGroupStopHookReceived.Add(2)
 	cs.init()
 	return cs
 }
@@ -135,13 +144,77 @@ func (cs *CouchbaseSidecar) init() {
 
 	versionCmd := &cobra.Command{
 		Use:   "version",
-		Short: fmt.Sprintf("Print the version number of %s", AppVersion),
+		Short: fmt.Sprintf("Print the version number of %s", AppName),
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("%s version %s git-commit=%s git-state=%s\n", AppName, AppVersion, AppGitCommit, AppGitState)
 		},
 	}
-
 	cs.RootCmd.AddCommand(versionCmd)
+
+	stopCmd := &cobra.Command{
+		Use:   "stop",
+		Short: "Asking sidecar to stop database application",
+		Run: func(cmd *cobra.Command, args []string) {
+			cs.Log().Infof("asking sidecar to stop")
+			client, err := cs.RPCClient()
+			if err != nil {
+				cs.Log().Fatal("dialing:", err)
+			}
+
+			err = client.Call("App.Hook", "stop", nil)
+			if err != nil {
+				cs.Log().Fatal("sidecar stop error:", err)
+			}
+		},
+	}
+	cs.RootCmd.AddCommand(stopCmd)
+}
+
+func (cs *CouchbaseSidecar) copyMyself() error {
+
+	destPath := "/sidecar"
+	_, err := os.Stat(destPath)
+	if err != nil {
+		return err
+	}
+
+	sourcePath, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		return err
+	}
+	basename := filepath.Base(sourcePath)
+
+	destPath = filepath.Join(destPath, basename)
+
+	cs.Log().Debugf("copy myself from '%s' to '%s'", sourcePath, destPath)
+	sourceFile, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	sourceFileStat, err := sourceFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	if !sourceFileStat.Mode().IsRegular() {
+		fmt.Errorf("%s is not a regular file", sourceFile)
+	}
+
+	destFile, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return err
+	}
+
+	return os.Chmod(destPath, 0755)
+
 }
 
 func (cs *CouchbaseSidecar) run() error {
@@ -150,6 +223,16 @@ func (cs *CouchbaseSidecar) run() error {
 	go func() {
 		<-c
 		cs.Stop()
+	}()
+
+	// copy myself to folder
+	cs.waitGroupWorkers.Add(1)
+	go func() {
+		defer cs.waitGroupWorkers.Done()
+		err := cs.copyMyself()
+		if err != nil {
+			cs.Log().Warnf("Failed to provide binary to main container: %s", err)
+		}
 	}()
 
 	err := cs.readEnvironmentVariables()
@@ -171,7 +254,8 @@ func (cs *CouchbaseSidecar) run() error {
 	cs.startMonitor()
 	cs.startHealthCheck()
 
-	cs.waitGroup.Wait()
+	cs.waitGroupWorkers.Wait()
+	cs.waitGroupStopHookFinished.Wait()
 
 	return nil
 }
@@ -209,29 +293,28 @@ func (cs *CouchbaseSidecar) Stop() {
 }
 
 func (cs *CouchbaseSidecar) startMaster() {
-	cs.Log().Infof("test")
 	cs.master = &master{cs: cs}
-	cs.waitGroup.Add(1)
+	cs.waitGroupWorkers.Add(1)
 	go func() {
-		defer cs.waitGroup.Done()
+		defer cs.waitGroupWorkers.Done()
 		cs.master.run()
 	}()
 }
 
 func (cs *CouchbaseSidecar) startMonitor() {
 	cs.monitor = &monitor{cs: cs}
-	cs.waitGroup.Add(1)
+	cs.waitGroupWorkers.Add(1)
 	go func() {
-		defer cs.waitGroup.Done()
+		defer cs.waitGroupWorkers.Done()
 		cs.monitor.run()
 	}()
 }
 
 func (cs *CouchbaseSidecar) startHealthCheck() {
 	cs.healthCheck = &healthCheck{cs: cs}
-	cs.waitGroup.Add(1)
+	cs.waitGroupWorkers.Add(1)
 	go func() {
-		defer cs.waitGroup.Done()
+		defer cs.waitGroupWorkers.Done()
 		cs.healthCheck.run()
 	}()
 }
